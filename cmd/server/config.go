@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
@@ -21,6 +22,9 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// ClientKeys 只能调用 /v1/*（不能登录面板）的附加密钥，面板「客户端密钥」增删，热生效。
+	ClientKeys []livecfg.ClientKey `json:"client_keys"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -453,6 +457,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if err := c.normalizeClientKeys(); err != nil {
+		return err
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
@@ -595,6 +602,48 @@ func (c *Config) normalize() error {
 		return err
 	}
 	return c.normalizePrompt()
+}
+
+// normalizeClientKeys 去空白、丢空 key，重复或与 api_key 相同的 key 直接报错。
+// expires_at 为 0 = 永久；不允许负数（到点已失效的过期密钥保留在列表中由面板展示/删除，
+// 鉴权侧 ValidKeys 过滤，不会放行）。models 白名单 trim/丢空/去重，空 = 不限制。
+func (c *Config) normalizeClientKeys() error {
+	seen := map[string]bool{}
+	out := c.ClientKeys[:0]
+	for _, k := range c.ClientKeys {
+		k.Key = strings.TrimSpace(k.Key)
+		k.Name = strings.TrimSpace(k.Name)
+		if k.Key == "" {
+			continue
+		}
+		if k.ExpiresAt < 0 {
+			return fmt.Errorf("client_keys: %q 的 expires_at 非法（负数）", k.Name)
+		}
+		if k.Key == c.APIKey {
+			return fmt.Errorf("client_keys: %q 与 api_key 相同", k.Name)
+		}
+		if seen[k.Key] {
+			return fmt.Errorf("client_keys: 密钥重复（%q）", k.Name)
+		}
+		if len(k.Models) > livecfg.MaxClientKeyModels {
+			return fmt.Errorf("client_keys: %q 的模型白名单超过 %d 条", k.Name, livecfg.MaxClientKeyModels)
+		}
+		seenModel := map[string]bool{}
+		models := make([]string, 0, len(k.Models))
+		for _, m := range k.Models {
+			m = strings.TrimSpace(m)
+			if m == "" || seenModel[m] {
+				continue
+			}
+			seenModel[m] = true
+			models = append(models, m)
+		}
+		k.Models = models
+		seen[k.Key] = true
+		out = append(out, k)
+	}
+	c.ClientKeys = out
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

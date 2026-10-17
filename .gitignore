@@ -45,3 +45,10 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 本地开发/运行时产物（勿入版本库）
+anthropic_relay.py
+relay.log
+*.log
+wb2api.exe~
+/wb2api-features-*.tar.gz

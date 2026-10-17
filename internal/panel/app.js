@@ -345,7 +345,7 @@ function go(v) {
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
-  if (v === 'config') loadConfig();
+  if (v === 'config') { loadConfig(); loadClientKeys(); }
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
@@ -962,6 +962,154 @@ function fmtBytes(bytes) {
 $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
+};
+
+/* ── 客户端密钥 ───────────────────────────────────────────────────── */
+let ckKeys = [];
+// 新建表单的模型白名单（id 数组，调用值即 /v1/models 的 id）；空 = 不限制。
+let ckModels = [];
+let ckCatalog = null; // 上游模型目录（懒加载：打开选择器时才实时探测）
+
+// ckModelsSum 摘要：「未选择 = 不限制」或「已选 N 个：a、b…」。
+function ckRenderModelsSum() {
+  const sum = $('ckModelsSum');
+  if (!ckModels.length) {
+    sum.textContent = '未选择 = 不限制（可用全部模型）';
+  } else {
+    const show = ckModels.slice(0, 3).join('、');
+    sum.textContent = `已选 ${ckModels.length} 个：${show}${ckModels.length > 3 ? ' …' : ''}`;
+  }
+  $('ckModelCount').textContent = ckCatalog
+    ? (ckModels.length ? `已选 ${ckModels.length} / ${ckCatalog.length}` : `共 ${ckCatalog.length} 个模型`)
+    : '';
+}
+function ckSyncCheckboxes() {
+  document.querySelectorAll('#ckModelList .ck-model').forEach(c => { c.checked = ckModels.includes(c.value); });
+}
+async function ckLoadCatalog() {
+  if (ckCatalog) return;
+  $('ckModelList').innerHTML = '<div class="note">正在探测上游模型…</div>';
+  try {
+    const d = await api('models');
+    ckCatalog = (d.models || []).map(m => ({ id: m.id, name: m.name || m.id }));
+  } catch (e) {
+    $('ckModelList').innerHTML = '<div class="note">模型列表拉取失败：' + esc(e.message) + '，点「选择可用模型」重试</div>';
+    return;
+  }
+  if (!ckCatalog.length) {
+    $('ckModelList').innerHTML = '<div class="note">上游未返回模型（先检查账号池）</div>';
+    return;
+  }
+  $('ckModelList').innerHTML = ckCatalog.map(m => `<label class="inline" style="gap:6px">
+    <input type="checkbox" class="ck-model" value="${esc(m.id)}">
+    <span>${esc(m.name)} <code>${esc(m.id)}</code></span></label>`).join('');
+  ckSyncCheckboxes();
+  ckRenderModelsSum();
+}
+$('btnCkModels').onclick = async () => {
+  const box = $('ckModelPick');
+  box.hidden = !box.hidden;
+  if (!box.hidden) await ckLoadCatalog();
+};
+$('btnCkModelAll').onclick = () => {
+  if (!ckCatalog) return;
+  ckModels = ckCatalog.map(m => m.id);
+  ckSyncCheckboxes();
+  ckRenderModelsSum();
+};
+$('btnCkModelNone').onclick = () => {
+  ckModels = [];
+  ckSyncCheckboxes();
+  ckRenderModelsSum();
+};
+$('ckModelList').onchange = (ev) => {
+  const cb = ev.target;
+  if (!cb.classList || !cb.classList.contains('ck-model')) return;
+  if (cb.checked) {
+    if (!ckModels.includes(cb.value)) ckModels.push(cb.value);
+  } else {
+    ckModels = ckModels.filter(m => m !== cb.value);
+  }
+  ckRenderModelsSum();
+};
+// ckModelsCell 表格列：全部 / 前两个 id + “+n”（title 给全量）。
+function ckModelsCell(k) {
+  const ms = k.models || [];
+  if (!ms.length) return '<span class="note">全部</span>';
+  const title = esc(ms.join(', '));
+  const show = esc(ms.slice(0, 2).join('、'));
+  return `<span title="${title}">${show}${ms.length > 2 ? ` <span class="note">+${ms.length - 2}</span>` : ''}</span>`;
+}
+// ckExpiryCell 到期列：永久 / 剩余时间 / 已过期（到点自动失效，无需手动删）。
+function ckExpiryCell(k) {
+  if (!k.expires_at) return '<span class="note">永久</span>';
+  const left = k.expires_at * 1000 - Date.now();
+  const dt = new Date(k.expires_at * 1000).toLocaleString('zh-CN');
+  if (left <= 0) return `<span style="color:var(--bad)">已过期</span> <span class="note">${esc(dt)}</span>`;
+  const h = Math.floor(left / 3600000), m = Math.floor((left % 3600000) / 60000);
+  const remain = (h > 0 ? h + '小时' : '') + (m > 0 || h === 0 ? m + '分' : '');
+  return `${esc(dt)} <span class="note">（剩 ${remain}）</span>`;
+}
+async function loadClientKeys() {
+  try {
+    const d = await api('client_keys');
+    ckKeys = d.keys || [];
+    const tb = $('ckRows');
+    if (!ckKeys.length) {
+      tb.innerHTML = '<tr><td colspan="6" class="note">暂无客户端密钥</td></tr>';
+    } else {
+      tb.innerHTML = ckKeys.map((k, i) => `<tr>
+        <td>${esc(k.name)}</td>
+        <td><code>${esc(k.key.slice(0, 7) + '…' + k.key.slice(-4))}</code></td>
+        <td>${esc(k.created_at ? new Date(k.created_at * 1000).toLocaleString('zh-CN') : '')}</td>
+        <td>${ckExpiryCell(k)}</td>
+        <td>${ckModelsCell(k)}</td>
+        <td><button type="button" class="xs" data-ck-copy="${i}">复制</button>
+            <button type="button" class="xs" data-ck-del="${i}">删除</button></td></tr>`).join('');
+    }
+    if (!d.auth_required) toast('api_key 为空（未启用鉴权），客户端密钥不生效', 'err');
+  } catch (e) { toast('读取客户端密钥失败：' + e.message, 'err'); }
+}
+$('btnCkAdd').onclick = async () => {
+  const name = $('ckName').value.trim();
+  if (!name) { toast('请先填写名称', 'err'); return; }
+  const hours = Number($('ckHours').value || 0);
+  if (!Number.isFinite(hours) || hours < 0 || hours > 8760) {
+    toast('有效期须为 0~8760 之间的小时数（0 = 永久）', 'err'); return;
+  }
+  try {
+    const d = await api('client_keys', { method: 'POST', body: JSON.stringify({ name, expires_in_hours: hours, models: ckModels }) });
+    $('ckName').value = '';
+    $('ckHours').value = '';
+    ckModels = [];
+    ckSyncCheckboxes();
+    ckRenderModelsSum();
+    $('ckModelPick').hidden = true;
+    const nb = $('ckNew');
+    nb.hidden = false;
+    nb.textContent = '已新建「' + d.key.name + '」：' + d.key.key +
+      (d.key.expires_at ? '（' + new Date(d.key.expires_at * 1000).toLocaleString('zh-CN') + ' 自动失效）' : '（永久有效）') +
+      (d.key.models && d.key.models.length ? '（限 ' + d.key.models.length + ' 个模型）' : '（不限制模型）');
+    copyText(d.key.key).then(() => toast('已新建并复制到剪贴板', 'ok'), () => toast('已新建', 'ok'));
+    loadClientKeys();
+  } catch (e) { toast('新建失败：' + e.message, 'err'); }
+};
+$('ckRows').onclick = async (ev) => {
+  const btn = ev.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.ckCopy != null) {
+    const k = ckKeys[Number(btn.dataset.ckCopy)];
+    if (k) copyText(k.key).then(() => toast('已复制', 'ok'), () => toast('复制失败', 'err'));
+    return;
+  }
+  const k = ckKeys[Number(btn.dataset.ckDel)];
+  if (!k || !confirm('删除密钥「' + k.name + '」后，使用它的客户端会立刻 401。确认删除？')) return;
+  try {
+    await api('client_keys/delete', { method: 'POST', body: JSON.stringify({ key: k.key }) });
+    $('ckNew').hidden = true;
+    toast('已删除', 'ok');
+    loadClientKeys();
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
 };
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */

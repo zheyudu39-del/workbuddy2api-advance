@@ -859,3 +859,19 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+func TestClientKeysNormalize(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_key":"admin","client_keys":[{"name":" a ","key":" sk-1 "},{"name":"empty","key":""}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ClientKeys) != 1 || c.ClientKeys[0].Key != "sk-1" || c.ClientKeys[0].Name != "a" {
+		t.Errorf("client_keys=%+v", c.ClientKeys)
+	}
+	if _, err := ParseConfig([]byte(`{"api_key":"admin","client_keys":[{"name":"a","key":"admin"}]}`)); err == nil {
+		t.Error("client key equal to api_key should fail")
+	}
+	if _, err := ParseConfig([]byte(`{"api_key":"admin","client_keys":[{"name":"a","key":"k"},{"name":"b","key":"k"}]}`)); err == nil {
+		t.Error("duplicate client keys should fail")
+	}
+}

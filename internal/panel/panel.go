@@ -90,6 +90,8 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	clientKeyMu sync.Mutex // 串行化客户端密钥的读-改-写（clientkeys.go）
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -186,6 +188,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /panel/api/client_keys", p.withAuth(p.listClientKeys))
+	p.mux.HandleFunc("POST /panel/api/client_keys", p.withAuth(p.createClientKey))
+	p.mux.HandleFunc("POST /panel/api/client_keys/delete", p.withAuth(p.deleteClientKey))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

@@ -894,6 +894,34 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
+      <div class="box">
+        <header><h3>客户端密钥</h3><span class="grow"></span><span class="note">只能调用 /v1 模型接口，不能登录面板；增删立即生效</span></header>
+        <div class="pad">
+          <div class="inline">
+            <input id="ckName" placeholder="名称，如：笔记本 / Roo Code" maxlength="64">
+            <input id="ckHours" type="number" min="0" max="8760" step="1" placeholder="有效期(小时)，0=永久" style="width:180px" title="密钥多少小时后自动失效；0 或留空 = 永久">
+            <button type="button" class="xs" id="btnCkModels">选择可用模型</button>
+            <button type="button" id="btnCkAdd">新建密钥</button>
+          </div>
+          <div class="note" style="margin-top:6px">可用模型：<span id="ckModelsSum">未选择 = 不限制（可用全部模型）</span></div>
+          <div id="ckModelPick" class="pad" hidden>
+            <div class="inline" style="margin-bottom:8px">
+              <button type="button" class="xs" id="btnCkModelAll">全选</button>
+              <button type="button" class="xs" id="btnCkModelNone">清空</button>
+              <span class="note" id="ckModelCount"></span>
+            </div>
+            <div id="ckModelList" class="grid2" style="max-height:220px; overflow:auto"></div>
+            <div class="note" style="margin-top:6px">列表实时探测上游（与 /v1/models 同口径）；一个都不选 = 不限制。选中的模型之外，调用会返回 403。</div>
+          </div>
+          <div id="ckNew" class="hint" style="word-break:break-all" hidden></div>
+          <div class="tbl-wrap" style="margin-top:10px">
+          <table class="acc">
+            <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>到期</th><th>可用模型</th><th></th></tr></thead>
+            <tbody id="ckRows"></tbody>
+          </table>
+          </div>
+        </div>
+      </div>
       <form id="cfgForm">
         <div class="box">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>

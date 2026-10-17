@@ -170,12 +170,66 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		live := h.loadLive()
+		// 客户端密钥支持有效期：过期的密钥随即失效（ValidKeys 已过滤），
+		// 下一个请求即 401，无需重启。
+		if !httpauth.VerifyBearerAny(r, live.APIKey, live.ValidKeys()) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
+		// 客户端密钥模型白名单：鉴权通过后反查本令牌的白名单塞进上下文，
+		// 由 chatCompletions / models 消费。主 api_key 或无白名单的密钥不注入 = 不限制。
+		if models := live.ModelsForToken(bearerToken(r)); len(models) > 0 {
+			r = r.WithContext(context.WithValue(r.Context(), allowedModelsCtxKey{}, models))
+		}
 		next(w, r)
 	}
+}
+
+// allowedModelsCtxKey 请求上下文键：本请求所用客户端密钥的模型白名单。
+// 缺失/空 = 不限制（主 api_key，或未设白名单的客户端密钥）。
+type allowedModelsCtxKey struct{}
+
+// bearerToken 取出 Authorization 头里的 Bearer 令牌（无前缀返回 ""）。
+// 仅在鉴权通过后调用（用于反查密钥白名单），不参与鉴权判定本身。
+func bearerToken(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return ""
+	}
+	return authz[len("Bearer "):]
+}
+
+// allowedModelsFrom 取本请求的模型白名单（nil = 不限制）。
+func allowedModelsFrom(r *http.Request) []string {
+	if v, ok := r.Context().Value(allowedModelsCtxKey{}).([]string); ok {
+		return v
+	}
+	return nil
+}
+
+// modelAllowed 判断 model 是否命中白名单。白名单条目与请求值都过 resolveModel
+// 归一（"glm" 与 "cn:glm" 等价，"global:x" 只在 global 域匹配），客户端填裸名不误伤。
+func modelAllowed(allowed []string, model string) bool {
+	rq, bq := resolveModel(model)
+	for _, a := range allowed {
+		ra, ba := resolveModel(a)
+		if ra == rq && ba == bq {
+			return true
+		}
+	}
+	return false
+}
+
+// filterModelsByAllowlist 按白名单过滤 /v1/models 输出：越权模型对本密钥不可见。
+func filterModelsByAllowlist(list []map[string]any, allowed []string) []map[string]any {
+	out := make([]map[string]any, 0, len(allowed))
+	for _, e := range list {
+		if id, _ := e["id"].(string); id != "" && modelAllowed(allowed, id) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -277,9 +331,14 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	data := h.modelList()
+	// 客户端密钥白名单：越权模型对本密钥不可见（未注入 = 不限制，原样返回）。
+	if allowed := allowedModelsFrom(r); len(allowed) > 0 {
+		data = filterModelsByAllowlist(data, allowed)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   data,
 	})
 }
 
@@ -524,6 +583,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 客户端密钥模型白名单：越权模型在动账号之前就地 403（白名单由持钥人在面板创建时选定）。
+	// model 缺省（空串）不在此拦——交给上游自然报错，与无白名单路径同口径。
+	if allowed := allowedModelsFrom(r); len(allowed) > 0 && peek.Model != "" && !modelAllowed(allowed, peek.Model) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			"该 API 密钥无权使用模型 "+peek.Model+"（可用模型见 /v1/models）")
+		return
+	}
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」

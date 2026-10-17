@@ -36,6 +36,29 @@ func VerifyBearer(r *http.Request, key string) bool {
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
 }
 
+// VerifyBearerAny 同 VerifyBearer，但 primary 或 extra 中任一 key 匹配即通过。
+// primary 为空 = 未启用鉴权，恒放行（extra 不单独开启鉴权）。逐个比较不提前返回。
+func VerifyBearerAny(r *http.Request, primary string, extra []string) bool {
+	if primary == "" {
+		return true
+	}
+	authz := r.Header.Get("Authorization")
+	tok := ""
+	ok := strings.HasPrefix(authz, bearerPrefix)
+	if ok {
+		tok = authz[len(bearerPrefix):]
+	}
+	d := digest(tok)
+	match := subtle.ConstantTimeCompare(d, digest(primary))
+	for _, k := range extra {
+		if k == "" {
+			continue
+		}
+		match |= subtle.ConstantTimeCompare(d, digest(k))
+	}
+	return ok && match == 1
+}
+
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。
 func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))

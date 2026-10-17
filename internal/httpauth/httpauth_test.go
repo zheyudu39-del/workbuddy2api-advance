@@ -59,3 +59,25 @@ func TestDigestIsFixedLength(t *testing.T) {
 		t.Errorf("sha256 digest length = %d, want 32", len(digest("x")))
 	}
 }
+
+func TestVerifyBearerAny(t *testing.T) {
+	extra := []string{"sk-c1", "", "sk-c2"}
+	cases := []struct {
+		name    string
+		primary string
+		authz   string
+		want    bool
+	}{
+		{"primary 空放行", "", "", true},
+		{"primary 匹配", "admin", "Bearer admin", true},
+		{"附加 key 匹配", "admin", "Bearer sk-c2", true},
+		{"空串附加 key 不放行空 token", "admin", "Bearer ", false},
+		{"未知 key", "admin", "Bearer sk-x", false},
+		{"缺 Bearer 前缀", "admin", "sk-c1", false},
+	}
+	for _, c := range cases {
+		if got := VerifyBearerAny(req(c.authz), c.primary, extra); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}

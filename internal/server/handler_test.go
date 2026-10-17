@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -1071,6 +1072,150 @@ func TestAPIKeyAuth(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Errorf("right key: code=%d", rec.Code)
+	}
+}
+
+func TestClientKeyAuthHotSwap(t *testing.T) {
+	live := livecfg.New(livecfg.Snapshot{
+		APIKey:     "admin",
+		ClientKeys: []livecfg.ClientKey{{Name: "laptop", Key: "sk-client"}},
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: upstream.New(),
+		Live:     live,
+	})
+	code := func(key string) int {
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := code("admin"); c != 200 {
+		t.Errorf("admin key: code=%d", c)
+	}
+	if c := code("sk-client"); c != 200 {
+		t.Errorf("client key: code=%d", c)
+	}
+	if c := code("sk-other"); c != 401 {
+		t.Errorf("unknown key: code=%d", c)
+	}
+	live.Store(livecfg.Snapshot{APIKey: "admin"})
+	if c := code("sk-client"); c != 401 {
+		t.Errorf("deleted client key: code=%d", c)
+	}
+}
+
+// TestClientKeyExpiry 有效期：到点的密钥自动失效（401），未到点的照常放行；
+// 主 api_key 不受客户端密钥有效期影响。
+// TestClientKeyModelWhitelist 模型白名单：越权模型在动账号之前 403；
+// 白名单条目与请求值经 resolveModel 归一（裸名 "glm" ≡ "cn:glm"）；
+// 主 api_key 不受任何客户端密钥白名单约束。
+func TestClientKeyModelWhitelist(t *testing.T) {
+	live := livecfg.New(livecfg.Snapshot{
+		APIKey: "admin",
+		ClientKeys: []livecfg.ClientKey{
+			{Name: "glm-only", Key: "sk-glm", Models: []string{"cn:glm-5.2"}},
+			{Name: "free", Key: "sk-free"},
+		},
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: upstream.New(),
+		Live:     live,
+	})
+	// 越权判定发生在鉴权之后、上游之前：403 即命中；放行则请求打到测试上游
+	// （必然失败），只要是 non-403 就表明白名单未误伤。
+	chat := func(key, model string) int {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := chat("sk-glm", "cn:glm-5.2"); c == http.StatusForbidden {
+		t.Errorf("whitelisted model must not 403: code=%d", c)
+	}
+	if c := chat("sk-glm", "glm-5.2"); c == http.StatusForbidden {
+		t.Errorf("bare name must equal cn: prefix: code=%d", c)
+	}
+	if c := chat("sk-glm", "cn:kimi-k2"); c != http.StatusForbidden {
+		t.Errorf("model outside whitelist must 403: code=%d", c)
+	}
+	if c := chat("sk-free", "cn:kimi-k2"); c == http.StatusForbidden {
+		t.Errorf("key without whitelist must be unrestricted: code=%d", c)
+	}
+	if c := chat("admin", "cn:kimi-k2"); c == http.StatusForbidden {
+		t.Errorf("admin key must be unrestricted: code=%d", c)
+	}
+}
+
+// TestModelAllowedAndFilter 白名单匹配与 /v1/models 过滤的纯函数行为。
+func TestModelAllowedAndFilter(t *testing.T) {
+	allowed := []string{"cn:glm-5.2", "global:deepseek-v3"}
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"cn:glm-5.2", true},
+		{"glm-5.2", true},                 // 裸名归一到 cn
+		{"global:deepseek-v3", true},
+		{"deepseek-v3", false},            // 裸名归一到 cn，不等于 global 条目
+		{"cn:kimi-k2", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := modelAllowed(allowed, c.model); got != c.want {
+			t.Errorf("modelAllowed(%q) = %v, want %v", c.model, got, c.want)
+		}
+	}
+	list := []map[string]any{
+		{"id": "cn:glm-5.2"}, {"id": "cn:kimi-k2"}, {"id": "global:deepseek-v3"}, {"id": ""},
+	}
+	got := filterModelsByAllowlist(list, allowed)
+	if len(got) != 2 {
+		t.Fatalf("filtered len = %d, want 2", len(got))
+	}
+	if got[0]["id"] != "cn:glm-5.2" || got[1]["id"] != "global:deepseek-v3" {
+		t.Errorf("filtered ids = %v, %v", got[0]["id"], got[1]["id"])
+	}
+}
+
+func TestClientKeyExpiry(t *testing.T) {
+	now := time.Now().Unix()
+	live := livecfg.New(livecfg.Snapshot{
+		APIKey: "admin",
+		ClientKeys: []livecfg.ClientKey{
+			{Name: "expired", Key: "sk-expired", CreatedAt: now - 7200, ExpiresAt: now - 1},
+			{Name: "live", Key: "sk-live", CreatedAt: now, ExpiresAt: now + 3600},
+			{Name: "forever", Key: "sk-forever", CreatedAt: now},
+		},
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: upstream.New(),
+		Live:     live,
+	})
+	code := func(key string) int {
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := code("sk-expired"); c != 401 {
+		t.Errorf("expired key must 401: code=%d", c)
+	}
+	if c := code("sk-live"); c != 200 {
+		t.Errorf("unexpired key must pass: code=%d", c)
+	}
+	if c := code("sk-forever"); c != 200 {
+		t.Errorf("permanent key must pass: code=%d", c)
+	}
+	if c := code("admin"); c != 200 {
+		t.Errorf("admin key unaffected: code=%d", c)
 	}
 }
 
